@@ -1,0 +1,2 @@
+# Predicting-Bitcoin-Prices-with-ARIMA-A-Machine-Learning-Approach
+his repository contains a research project focused on forecasting Bitcoin (BTC‑USD) prices using the ARIMA (AutoRegressive Integrated Moving Average) model within a machine learning framework. The project explores the challenges of cryptocurrency volatility and demonstrates how ARIMA can be applied to time‑series data for financial forecasting.
