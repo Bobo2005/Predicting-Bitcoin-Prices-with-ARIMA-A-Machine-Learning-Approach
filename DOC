@@ -1,0 +1,30 @@
+Cryptocurrency markets are notoriously volatile, with Bitcoin (BTC‑USD) leading the charge in unpredictable price swings. This volatility makes forecasting both a challenge and a necessity for investors, traders, and researchers. My project, Prediction of Cryptocurrency (BTC‑USD) Prices Using ARIMA Machine Learning Model, explores how statistical time‑series methods can be applied to tame this uncertainty.
+
+ Why ARIMA?
+The AutoRegressive Integrated Moving Average (ARIMA) model is a classic statistical tool for time‑series forecasting. It captures trends, cycles, and short‑term dependencies in sequential data. In this project, ARIMA was chosen for its simplicity, interpretability, and proven track record in financial forecasting.
+
+Methodology
+Dataset: Daily closing Bitcoin prices (April 2017 — April 2025) from Yahoo Finance.
+Preprocessing: Ensured stationarity using first differencing; analyzed ACF and PACF plots.
+Model: Implemented ARIMA(1,1,1).
+Evaluation Metrics:
+Mean Absolute Error (MAE): $37,265.91
+Root Mean Squared Error (RMSE): $43,306.70
+Mean Absolute Percentage Error (MAPE): 0%
+The ARIMA model outperformed a naive baseline, successfully capturing short‑term trends.
+
+Key Findings
+ARIMA is effective for short‑term forecasting but struggles with abrupt price swings due to its linear assumptions.
+It cannot incorporate external factors like news, regulations, or investor sentiment.
+Hybrid approaches (e.g., ARIMAX, LSTM networks) could improve accuracy by handling nonlinear dynamics and exogenous variables.
+
+Significance
+Academic Contribution: Provides a benchmark for ARIMA in cryptocurrency forecasting and a foundation for hybrid models.
+FinTech Impact: Enhances algorithmic trading and AI‑driven financial systems.
+Investor Utility: Offers insights into short‑term price movements for better risk management and portfolio optimization.
+
+Future Directions
+The study recommends exploring ARIMAX (to include external variables) and hybrid models combining ARIMA with deep learning techniques like LSTM. These approaches could better capture the chaotic, nonlinear nature of cryptocurrency markets.
+
+Takeaway
+ARIMA may be a traditional model, but it still holds value in modern finance. While it cannot fully conquer Bitcoin’s wild volatility, it provides a transparent, interpretable baseline for forecasting and a stepping stone toward more advanced machine learning solutions.
