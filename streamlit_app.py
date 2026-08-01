@@ -558,6 +558,22 @@ with tab_overview:
             except Exception as exc:
                 st.error(f"Unable to read model comparison file: {exc}")
 
+            # Show ARIMA cross-validation results if available
+            arima_cv_file = OUTPUT_DIR / "arima_cv_results.csv"
+            if arima_cv_file.exists():
+                try:
+                    acv = load_csv(arima_cv_file, index_col=None)
+                    st.markdown("#### ARIMA rolling-window CV (MAE)")
+                    st.dataframe(acv)
+                    if "cv_mae" in acv.columns:
+                        fig_cv = px.bar(acv.sort_values("cv_mae"), x="order", y="cv_mae", title="ARIMA CV MAE by order")
+                        st.plotly_chart(fig_cv, use_container_width=True)
+                        best = acv.loc[acv["cv_mae"].idxmin()]
+                        st.markdown("**Best ARIMA order by CV MAE**")
+                        st.write(best.to_dict())
+                except Exception as exc:
+                    st.error(f"Unable to load ARIMA CV results: {exc}")
+
         st.markdown("### Forecast visualizations")
         arima_img = OUTPUT_DIR / "arima_forecast.png"
         future_img = OUTPUT_DIR / "future_forecast.png"
