@@ -16,11 +16,12 @@ def rolling_cv_scores_arima(
 ) -> float:
     """Compute average MAE for ARIMA order using expanding/rolling evaluation.
 
-    This is a simple and small routine to get a sense of parameter quality — not a full production CV.
+    This is a simple routine to estimate parameter quality without a full
+    production CV.
     """
     n = len(series)
     if n < train_window + horizon:
-        raise ValueError("Series too short for requested train window and horizon")
+        raise ValueError("Series too short for train window and horizon")
     maes = []
     start = n - (train_window + horizon)
     splits = 0
@@ -47,15 +48,15 @@ def rolling_cv_scores_arima(
     return float(np.mean(maes)) if maes else float("nan")
 
 
-def grid_search_rf(train_series: pd.Series, param_grid: dict, lags: int = 7) -> dict:
-    """Simple grid search for RandomForest hyperparameters using a single validation split.
+def grid_search_rf(
+    train_series: pd.Series,
+    param_grid: dict,
+    lags: int = 7,
+) -> dict:
+    """Search RandomForest hyperparameters using a simple validation split.
 
-    Returns dict with best_params and best_score; also supports a cross-validation mode if 'cv_splits' provided in param_grid as int.
-    """
-    """Simple grid search for RandomForest hyperparameters using a single validation split.
-
-    param_grid: dict of parameter name to list of values, e.g. {"n_estimators": [50,100], "max_depth": [5,10]}
-    Returns the best params dict by MAE on a held-out validation set (last 20% of data).
+    Returns a dict with best_params and best_score. Supports a cross-validation
+    mode if "cv_splits" is included in param_grid.
     """
     n = len(train_series)
     split = int(n * 0.8)
@@ -77,7 +78,8 @@ def grid_search_rf(train_series: pd.Series, param_grid: dict, lags: int = 7) -> 
     best_params = None
     from itertools import product
 
-    # allow cv splits via a key 'cv_splits' in param_grid (not tuning the value itself)
+    # Allow cv splits via a key 'cv_splits' in param_grid. This does not tune
+    # the split count itself.
     cv_splits = None
     if "cv_splits" in param_grid:
         cv_splits = param_grid.pop("cv_splits")
@@ -94,7 +96,8 @@ def grid_search_rf(train_series: pd.Series, param_grid: dict, lags: int = 7) -> 
             best_score = mae
             best_params = params
 
-    # if cv_splits is provided, run a simple expanding-window CV and override best_score with average
+    # If cv_splits is provided, run a simple expanding-window CV and override
+    # best_score with the average.
     if cv_splits and isinstance(cv_splits, int) and cv_splits > 1:
         # split the combined train+val into cv_splits folds and average
         n = len(train_series)

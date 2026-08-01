@@ -1,5 +1,3 @@
-import pandas as pd
-
 from forecasting import build_sample_df
 from preprocessing import create_ohlcv_features, detect_outliers_iqr
 

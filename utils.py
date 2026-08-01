@@ -27,19 +27,50 @@ def load_model(path: str):
 
 
 def log_run(output_path: str, metadata: dict) -> None:
-    """Write run metadata (config and metrics) to a JSON file.
+    """Log run metadata and metrics with MLflow.
 
-    The file will be appended as a new JSON object per line for easy ingestion.
+    The run will be logged to a local `mlruns` folder next to the provided output path.
     """
-    import datetime
-    import json
+    from pathlib import Path
 
-    entry = {
-        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
-        **metadata,
-    }
-    with open(output_path, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(entry) + "\n")
+    try:
+        import mlflow
+    except ImportError:
+        import datetime
+        import json
+
+        entry = {
+            "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+            **metadata,
+        }
+        with open(output_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
+        return
+
+    tracking_dir = Path(output_path).resolve().parent / "mlruns"
+    tracking_dir.mkdir(parents=True, exist_ok=True)
+    mlflow.set_tracking_uri(str(tracking_dir))
+    mlflow.set_experiment("arima_forecast_experiment")
+
+    with mlflow.start_run():
+        for param_name, param_value in metadata.get("config", {}).items():
+            mlflow.log_param(str(param_name), str(param_value))
+
+        metrics = metadata.get("metrics", {})
+        for metric_name, metric_value in metrics.items():
+            if isinstance(metric_value, dict):
+                for sub_metric, sub_value in metric_value.items():
+                    mlflow.log_metric(f"{metric_name}_{sub_metric}", float(sub_value))
+            else:
+                mlflow.log_metric(str(metric_name), float(metric_value))
+
+        for artifact_name, artifact_path in metadata.get("artifacts", {}).items():
+            try:
+                mlflow.log_artifact(
+                    str(artifact_path), artifact_path=str(artifact_name)
+                )
+            except Exception:
+                continue
 
 
 def retry(

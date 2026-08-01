@@ -1,6 +1,3 @@
-import numpy as np
-import pandas as pd
-
 from forecasting import build_sample_series, evaluate_forecast
 
 

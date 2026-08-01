@@ -1,38 +1,29 @@
 from __future__ import annotations
 
 import argparse
-import logging
+import os
+import subprocess
+import sys
 import warnings
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import matplotlib
 import yaml
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd
 
-from forecasting import (
-    DEFAULT_END_DATE,
-    DEFAULT_START_DATE,
-    DEFAULT_TICKER,
-    build_forecast_series,
-    build_naive_forecast,
-    compute_adf,
-    evaluate_forecast,
-    load_price_series,
-    split_train_test,
-)
+from forecasting import (DEFAULT_END_DATE, DEFAULT_START_DATE, DEFAULT_TICKER,
+                         build_forecast_series, build_naive_forecast,
+                         compute_adf, evaluate_forecast, load_price_series,
+                         split_train_test)
 from models import compare_models
-from preprocessing import (
-    create_lag_features,
-    create_ohlcv_features,
-    detect_outliers_iqr,
-    save_features,
-    scale_features,
-)
-from utils import save_model, set_global_seed
+from models_tuning import grid_search_rf, rolling_cv_scores_arima
+from preprocessing import (create_lag_features, create_ohlcv_features,
+                           detect_outliers_iqr, save_features, scale_features)
+from utils import set_global_seed
 
 
 def flatten_config(
@@ -115,7 +106,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--preprocess",
         action="store_true",
-        help="Run preprocessing/feature-engineering and save features to outputs/features.csv",
+        help=(
+            "Run preprocessing / feature-engineering and save features to "
+            "outputs/features.csv"
+        ),
     )
     parser.add_argument(
         "--preprocess-lags",
@@ -137,7 +131,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--compare-models",
         action="store_true",
-        help="Run model comparison (SARIMAX, Prophet if available, and RandomForest baseline)",
+        help=(
+            "Run model comparison (SARIMAX, Prophet if available, "
+            "and RandomForest baseline)"
+        ),
     )
     parser.add_argument(
         "--seasonal-period",
@@ -161,6 +158,11 @@ def parse_args() -> argparse.Namespace:
         "--tune",
         action="store_true",
         help="Run a short tuning routine for RF and SARIMAX (time-consuming)",
+    )
+    parser.add_argument(
+        "--background",
+        action="store_true",
+        help="Run the selected workflow in a detached background process",
     )
     parser.set_defaults(**config_values)
     return parser.parse_args()
@@ -186,6 +188,66 @@ def parse_candidate_orders(
     if not orders:
         raise ValueError("No candidate orders were provided")
     return orders
+
+
+def build_background_command(args: argparse.Namespace) -> list[str]:
+    command: list[str] = [sys.executable, str(Path(__file__).resolve())]
+    if args.tune:
+        command.append("--tune")
+    if args.compare_models:
+        command.append("--compare-models")
+    if args.preprocess:
+        command.append("--preprocess")
+    if args.config:
+        command.extend(["--config", args.config])
+    if args.ticker:
+        command.extend(["--ticker", args.ticker])
+    if args.start_date:
+        command.extend(["--start-date", args.start_date])
+    if args.end_date:
+        command.extend(["--end-date", args.end_date])
+    if args.forecast_steps is not None:
+        command.extend(["--forecast-steps", str(args.forecast_steps)])
+    if args.output_dir:
+        command.extend(["--output-dir", args.output_dir])
+    if args.use_sample:
+        command.append("--use-sample")
+    if args.candidate_orders:
+        orders = args.candidate_orders
+        if isinstance(orders, list):
+            orders = ";".join(
+                ",".join(str(int(value)) for value in order) for order in orders
+            )
+        command.extend(["--candidate-orders", str(orders)])
+    if args.seasonal_period is not None:
+        command.extend(["--seasonal-period", str(args.seasonal_period)])
+    if args.rf_lags is not None:
+        command.extend(["--rf-lags", str(args.rf_lags)])
+    if args.ma_window is not None:
+        command.extend(["--ma-window", str(args.ma_window)])
+    return command
+
+
+def start_background_process(args: argparse.Namespace, log_path: Path) -> None:
+    command = build_background_command(args)
+    if not command:
+        raise RuntimeError("Unable to start a background process from empty command")
+
+    popen_args = {
+        "cwd": str(Path(__file__).resolve().parent),
+        "stdout": open(log_path, "a", encoding="utf-8"),
+        "stderr": subprocess.STDOUT,
+        "text": True,
+    }
+    if os.name == "nt":
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+        if hasattr(subprocess, "DETACHED_PROCESS"):
+            creationflags |= subprocess.DETACHED_PROCESS
+        popen_args["creationflags"] = creationflags
+    else:
+        popen_args["preexec_fn"] = os.setsid
+
+    subprocess.Popen(command, **popen_args)
 
 
 def save_forecast_plot(
@@ -282,11 +344,82 @@ def save_metrics(
         pass
 
 
+def run_tuning(
+    series: pd.Series,
+    output_dir: Path,
+    candidate_orders: list[tuple[int, int, int]],
+    rf_lags: int,
+    cv_splits: int = 3,
+    arima_train_window: int = 150,
+    arima_horizon: int = 7,
+) -> dict[str, Any]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    tuning_rows: list[dict[str, Any]] = []
+    for order in candidate_orders:
+        try:
+            score = rolling_cv_scores_arima(
+                series,
+                order=order,
+                train_window=arima_train_window,
+                horizon=arima_horizon,
+                max_splits=cv_splits,
+            )
+            tuning_rows.append(
+                {
+                    "order": f"{order}",
+                    "cv_mae": float(score),
+                    "train_window": arima_train_window,
+                    "horizon": arima_horizon,
+                }
+            )
+        except Exception:
+            continue
+
+    order_df = pd.DataFrame(tuning_rows)
+    order_csv = output_dir / "arima_tuning_results.csv"
+    order_df.to_csv(order_csv, index=False)
+
+    rf_param_grid = {
+        "n_estimators": [50, 100],
+        "max_depth": [5, 10, None],
+        "cv_splits": cv_splits,
+    }
+    rf_tuning = grid_search_rf(series, rf_param_grid, lags=rf_lags)
+    rf_params = rf_tuning.get("best_params", {}) or {}
+    rf_summary = pd.DataFrame(
+        [{"parameter": name, "value": str(value)} for name, value in rf_params.items()]
+    )
+    rf_summary.to_csv(output_dir / "rf_tuning_params.csv", index=False)
+
+    summary_path = output_dir / "tuning_summary.txt"
+    with open(summary_path, "w", encoding="utf-8") as fh:
+        fh.write("ARIMA tuning results\n")
+        fh.write(order_df.to_string(index=False))
+        fh.write("\n\nRF tuning best parameters:\n")
+        for param, value in rf_params.items():
+            fh.write(f"{param}: {value}\n")
+        fh.write(f"best RF MAE: {rf_tuning.get('best_score')}\n")
+
+    return {
+        "arima_tuning_csv": str(order_csv),
+        "rf_tuning_params_csv": str(output_dir / "rf_tuning_params.csv"),
+        "summary_text": str(summary_path),
+        "best_rf_params": rf_params,
+        "best_rf_score": float(rf_tuning.get("best_score", float("nan"))),
+    }
+
+
 def main() -> None:
     args = parse_args()
     set_global_seed(args.seed)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.background:
+        log_path = output_dir / "background.log"
+        start_background_process(args, log_path)
+        print(f"Workflow started in background. See {log_path} for logs.")
+        return
 
     warnings.filterwarnings("ignore")
 
@@ -347,6 +480,26 @@ def main() -> None:
             cmp_df.to_csv(output_dir / "model_comparison_summary.csv", index=False)
         except Exception:
             pass
+        if args.tune:
+            tuning_meta = run_tuning(
+                prices,
+                output_dir,
+                parse_candidate_orders(args.candidate_orders),
+                rf_lags=args.rf_lags,
+            )
+            print("Tuning completed:")
+            print(tuning_meta)
+        return
+
+    if args.tune:
+        tuning_meta = run_tuning(
+            prices,
+            output_dir,
+            parse_candidate_orders(args.candidate_orders),
+            rf_lags=args.rf_lags,
+        )
+        print("Tuning completed:")
+        print(tuning_meta)
         return
 
     forecast_result = build_forecast_series(
@@ -364,7 +517,91 @@ def main() -> None:
     save_forecast_plot(
         output_dir, prices, train_series, test_series, forecast_result["forecast"]
     )
+    # Persist forecast series so the dashboard can load numeric results
+    try:
+        forecast_result["forecast"].to_csv(
+            output_dir / "arima_forecast.csv", header=True
+        )
+    except Exception:
+        pass
+
     save_future_forecast_plot(output_dir, prices, forecast_result["future_forecast"])
+    try:
+        forecast_result["future_forecast"].to_csv(
+            output_dir / "future_forecast.csv", header=True
+        )
+    except Exception:
+        pass
+
+    # Save historical prices for interactive dashboard plotting
+    try:
+        prices.to_csv(output_dir / "prices.csv", header=True)
+    except Exception:
+        pass
+
+    # Build combined series (historical + test forecast + future forecast) with optional CI
+    try:
+        combined_index = prices.index.union(forecast_result["forecast"].index).union(
+            forecast_result["future_forecast"].index
+        )
+        combined = pd.DataFrame(index=combined_index.sort_values())
+        combined["price"] = prices.reindex(combined.index)
+        combined.loc[forecast_result["forecast"].index, "arima_forecast"] = (
+            forecast_result["forecast"].reindex(combined.index)
+        )
+        combined.loc[forecast_result["future_forecast"].index, "future_forecast"] = (
+            forecast_result["future_forecast"].reindex(combined.index)
+        )
+        # Attempt to fetch confidence intervals from the fitted model
+        try:
+            fit = forecast_result.get("model_fit")
+            if fit is not None:
+                # CI for test-forecast
+                try:
+                    ci_test = fit.get_forecast(steps=len(test_series)).conf_int()
+                    ci_test.index = test_series.index
+                    combined.loc[test_series.index, "arima_lower"] = ci_test.iloc[:, 0]
+                    combined.loc[test_series.index, "arima_upper"] = ci_test.iloc[:, 1]
+                except Exception:
+                    pass
+                # CI for future forecast
+                try:
+                    ci_future = fit.get_forecast(steps=args.forecast_steps).conf_int()
+                    # align with future forecast index
+                    ci_future.index = forecast_result["future_forecast"].index
+                    combined.loc[
+                        forecast_result["future_forecast"].index, "future_lower"
+                    ] = ci_future.iloc[:, 0]
+                    combined.loc[
+                        forecast_result["future_forecast"].index, "future_upper"
+                    ] = ci_future.iloc[:, 1]
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # tidy combined for download: round floats and reorder columns
+        try:
+            cols = [
+                "price",
+                "arima_forecast",
+                "arima_lower",
+                "arima_upper",
+                "future_forecast",
+                "future_lower",
+                "future_upper",
+            ]
+            existing = [c for c in cols if c in combined.columns]
+            tidy = combined[existing].copy()
+            # round numeric columns for readability
+            tidy = tidy.round(4)
+            tidy.to_csv(output_dir / "combined_forecast.csv")
+        except Exception:
+            # fallback to raw combined
+            combined.to_csv(output_dir / "combined_forecast.csv")
+    except Exception:
+        pass
+
     save_metrics(
         output_dir,
         arima_metrics,

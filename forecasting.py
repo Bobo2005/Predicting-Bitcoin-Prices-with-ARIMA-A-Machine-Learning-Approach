@@ -17,8 +17,8 @@ except ImportError:  # pragma: no cover - exercised when dependency is absent
 from utils import retry
 
 DEFAULT_TICKER = "BTC-USD"
-DEFAULT_START_DATE = "2017-04-01"
-DEFAULT_END_DATE = "2025-04-05"
+DEFAULT_START_DATE = "2017-07-31"
+DEFAULT_END_DATE = "2026-07-31"
 
 
 def build_sample_series() -> pd.Series:
@@ -92,7 +92,10 @@ def load_price_series(
         return prices
     except Exception as exc:  # pragma: no cover - depends on network availability
         warnings.warn(
-            f"Unable to download {ticker}: {exc}. Using a built-in sample series instead."
+            (
+                f"Unable to download {ticker}: {exc}. "
+                "Using a built-in sample series instead."
+            )
         )
         return build_sample_df() if return_df else build_sample_series()
 

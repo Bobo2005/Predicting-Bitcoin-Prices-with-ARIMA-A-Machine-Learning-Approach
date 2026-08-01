@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import warnings
-from typing import Sequence
 
 import numpy as np
 import pandas as pd
@@ -134,8 +133,9 @@ def compare_models(
     persist_models: bool = True,
 ) -> pd.DataFrame:
     """
-    Compare SARIMAX, Prophet (if available), and RandomForest baseline on a train/test split.
-    Returns a DataFrame with metrics for each model and also writes a metrics CSV if output_dir is provided.
+    Compare SARIMAX, Prophet (if available), and RandomForest baseline on a
+    train/test split. Returns a DataFrame with metrics for each model and also
+    writes a metrics CSV if output_dir is provided.
     """
     n = len(full_series)
     train_size = int(n * train_split)
@@ -147,7 +147,6 @@ def compare_models(
     results = []
     # ARIMA via SARIMAX (non-seasonal)
     try:
-        fit_obj = None
         sarima_pred = sarimax_forecast(train, test.index, order=(1, 1, 1))
         mae = mean_absolute_error(test, sarima_pred)
         rmse = np.sqrt(mean_squared_error(test, sarima_pred))

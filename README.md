@@ -20,6 +20,12 @@ Install dependencies with:
 pip install -r requirements.txt
 ```
 
+Install git hooks locally with:
+
+```bash
+pre-commit install
+```
+
 ## Running the project
 
 Run the main forecasting pipeline:
@@ -45,6 +51,14 @@ Run preprocessing and save the feature matrix:
 ```bash
 python main.py --preprocess --use-sample --output-dir outputs
 ```
+
+Run a tuning workflow in the background:
+
+```bash
+python main.py --tune --background --output-dir outputs
+```
+
+The background workflow logs output to `outputs/background.log` and continues after the CLI exits.
 
 Run model comparison across all available baselines and optional Prophet:
 
@@ -85,6 +99,10 @@ streamlit run streamlit_app.py
 ```
 
 The dashboard loads feature data and model comparison results from the output folder.
+
+## MLflow experiment tracking
+
+Run metadata and metrics are now logged with MLflow to `outputs/mlruns` by default. This replaces JSONL-only run storage and provides an experiment history you can query with the MLflow UI.
 
 ### Dashboard features
 

@@ -1,4 +1,4 @@
-import os
+import importlib
 import subprocess
 import sys
 from pathlib import Path
@@ -7,6 +7,7 @@ from typing import Any
 import joblib
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 st.set_page_config(page_title="ARIMA Forecast Dashboard", layout="wide")
@@ -38,6 +39,9 @@ if "initialized" not in st.session_state:
             "ma_window": 7,
             "run_process": None,
             "run_status": "idle",
+            # UI preferences persisted in session state
+            "show_ci": True,
+            "visible_traces": ["Historical Price", "ARIMA (test)", "Future Forecast"],
             "initialized": True,
         }
     )
@@ -152,6 +156,32 @@ def show_download_buttons() -> None:
                     file_name="model_comparison_metrics.csv",
                     mime="text/csv",
                 )
+            # additional forecast-related downloads
+            arima_csv = OUTPUT_DIR / "arima_forecast.csv"
+            future_csv = OUTPUT_DIR / "future_forecast.csv"
+            combined_csv = OUTPUT_DIR / "combined_forecast.csv"
+            prices_csv = OUTPUT_DIR / "prices.csv"
+            if arima_csv.exists():
+                st.download_button(
+                    "Download arima_forecast.csv",
+                    arima_csv.read_bytes(),
+                    file_name="arima_forecast.csv",
+                    mime="text/csv",
+                )
+            if future_csv.exists():
+                st.download_button(
+                    "Download future_forecast.csv",
+                    future_csv.read_bytes(),
+                    file_name="future_forecast.csv",
+                    mime="text/csv",
+                )
+            if combined_csv.exists():
+                st.download_button(
+                    "Download combined_forecast.csv",
+                    combined_csv.read_bytes(),
+                    file_name="combined_forecast.csv",
+                    mime="text/csv",
+                )
         with col_b:
             if (OUTPUT_DIR / "metrics.csv").exists():
                 st.download_button(
@@ -168,14 +198,22 @@ def show_download_buttons() -> None:
                     file_name="rf_model.joblib",
                     mime="application/octet-stream",
                 )
+            if prices_csv.exists():
+                st.download_button(
+                    "Download prices.csv",
+                    prices_csv.read_bytes(),
+                    file_name="prices.csv",
+                    mime="text/csv",
+                )
 
 
 def explain_rf_model() -> None:
     shap_available = True
     try:
-        import shap  # noqa: F401
+        shap = importlib.import_module("shap")
     except ImportError:
         shap_available = False
+        shap = None
 
     model_path = find_model_file()
     if model_path is None:
@@ -205,13 +243,11 @@ def explain_rf_model() -> None:
         "This uses the saved `outputs/rf_model.joblib` model and lag features from `outputs/features.csv`."
     )
 
-    if not shap_available:
+    if not shap_available or shap is None:
         st.warning(
             "SHAP is not installed. Install it with `pip install shap` and restart the dashboard."
         )
         return
-
-    import shap
 
     explainer = shap.TreeExplainer(model)
     shap_values = explainer(X)
@@ -416,7 +452,7 @@ with tab_overview:
             )
         else:
             try:
-                mdf = load_csv(model_source)
+                mdf = load_csv(model_source, index_col=None)
                 st.dataframe(mdf)
                 if "mae" in mdf.columns:
                     best = mdf.loc[mdf["mae"].idxmin()]
@@ -430,6 +466,215 @@ with tab_overview:
                     st.plotly_chart(fig_mape, use_container_width=True)
             except Exception as exc:
                 st.error(f"Unable to read model comparison file: {exc}")
+
+        st.markdown("### Forecast visualizations")
+        arima_img = OUTPUT_DIR / "arima_forecast.png"
+        future_img = OUTPUT_DIR / "future_forecast.png"
+        arima_csv = OUTPUT_DIR / "arima_forecast.csv"
+        future_csv = OUTPUT_DIR / "future_forecast.csv"
+
+        # Prefer combined interactive chart when available
+        combined_csv = OUTPUT_DIR / "combined_forecast.csv"
+        if combined_csv.exists():
+            try:
+                cdf = pd.read_csv(combined_csv, index_col=0, parse_dates=True)
+
+                # UI control: show/hide confidence intervals (persisted in session_state)
+                show_ci = st.checkbox(
+                    "Show confidence intervals",
+                    value=st.session_state.get("show_ci", True),
+                    key="show_ci",
+                )
+
+                # Trace visibility controls (persisted)
+                trace_options = ["Historical Price", "ARIMA (test)", "Future Forecast"]
+                visible = st.multiselect(
+                    "Show traces",
+                    options=trace_options,
+                    default=st.session_state.get("visible_traces", trace_options),
+                    key="visible_traces",
+                )
+
+                # build interactive Plotly figure with improved hover and date formatting
+                fig = go.Figure()
+                hover_template = "%{x|%Y-%m-%d}<br>Price: $%{y:.2f}<extra></extra>"
+
+                if "price" in cdf.columns and "Historical Price" in visible:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=cdf.index,
+                            y=cdf["price"],
+                            mode="lines",
+                            name="Historical Price",
+                            line=dict(color="black"),
+                            hovertemplate=hover_template,
+                        )
+                    )
+                if "arima_forecast" in cdf.columns:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=cdf.index,
+                            y=cdf["arima_forecast"],
+                            mode="lines",
+                            name="ARIMA (test)",
+                            line=dict(color="red", dash="dash"),
+                            hovertemplate=hover_template,
+                        )
+                    )
+                    # CI for ARIMA (test)
+                    if (
+                        show_ci
+                        and "arima_upper" in cdf.columns
+                        and "arima_lower" in cdf.columns
+                    ):
+                        # add upper then lower with fill to create shaded band
+                        fig.add_trace(
+                            go.Scatter(
+                                x=cdf.index,
+                                y=cdf.get("arima_upper"),
+                                line=dict(width=0),
+                                hoverinfo="skip",
+                                showlegend=False,
+                                name="ARIMA CI Upper",
+                            )
+                        )
+                        fig.add_trace(
+                            go.Scatter(
+                                x=cdf.index,
+                                y=cdf.get("arima_lower"),
+                                line=dict(width=0),
+                                fill="tonexty",
+                                fillcolor="rgba(255,0,0,0.12)",
+                                hoverinfo="skip",
+                                showlegend=False,
+                                name="ARIMA CI Lower",
+                            )
+                        )
+                if "future_forecast" in cdf.columns:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=cdf.index,
+                            y=cdf["future_forecast"],
+                            mode="lines",
+                            name="Future Forecast",
+                            line=dict(color="green"),
+                            hovertemplate=hover_template,
+                        )
+                    )
+                    # CI for future
+                    if (
+                        show_ci
+                        and "future_upper" in cdf.columns
+                        and "future_lower" in cdf.columns
+                    ):
+                        fig.add_trace(
+                            go.Scatter(
+                                x=cdf.index,
+                                y=cdf.get("future_upper"),
+                                line=dict(width=0),
+                                hoverinfo="skip",
+                                showlegend=False,
+                                name="Future CI Upper",
+                            )
+                        )
+                        fig.add_trace(
+                            go.Scatter(
+                                x=cdf.index,
+                                y=cdf.get("future_lower"),
+                                line=dict(width=0),
+                                fill="tonexty",
+                                fillcolor="rgba(0,128,0,0.12)",
+                                hoverinfo="skip",
+                                showlegend=False,
+                                name="Future CI Lower",
+                            )
+                        )
+
+                fig.update_layout(
+                    title="Combined Forecast: Historical + ARIMA + Future",
+                    xaxis_title="Date",
+                    yaxis_title="Price (USD)",
+                    hovermode="x unified",
+                    xaxis=dict(rangeslider=dict(visible=True), type="date"),
+                    yaxis=dict(tickprefix="$"),
+                    legend=dict(
+                        orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
+                    ),
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
+
+                # Percent-change summary between last historical and final forecast
+                try:
+                    last_hist = cdf["price"].dropna().iloc[-1]
+                    final_pred = cdf["future_forecast"].dropna().iloc[-1]
+                    pct_change = (final_pred - last_hist) / last_hist * 100
+                    st.markdown("### Forecast summary")
+                    final_date = cdf["future_forecast"].dropna().index[-1].date()
+                    st.metric(
+                        label=f"Predicted price on {final_date}",
+                        value=f"{final_pred:.2f}",
+                        delta=f"{pct_change:.2f}%",
+                    )
+                except Exception:
+                    # fall back to earlier simple metric if combined fails
+                    pass
+
+            except Exception as exc:
+                st.error(f"Unable to load combined forecast CSV: {exc}")
+
+        else:
+            if arima_img.exists():
+                st.markdown("#### ARIMA forecast (plot)")
+                st.image(str(arima_img), use_column_width=True)
+            elif arima_csv.exists():
+                try:
+                    af = pd.read_csv(
+                        arima_csv, index_col=0, parse_dates=True, squeeze=True
+                    )
+                    st.line_chart(af)
+                except Exception as exc:
+                    st.error(f"Unable to load ARIMA forecast CSV: {exc}")
+            else:
+                st.info(
+                    "No ARIMA forecast image or CSV found. Run a forecast to generate outputs/arima_forecast.png or arima_forecast.csv"
+                )
+
+            if future_img.exists():
+                st.markdown("#### Future forecast (plot)")
+                st.image(str(future_img), use_column_width=True)
+            elif future_csv.exists():
+                try:
+                    ff = pd.read_csv(
+                        future_csv, index_col=0, parse_dates=True, squeeze=True
+                    )
+                    st.line_chart(ff)
+                except Exception as exc:
+                    st.error(f"Unable to load future forecast CSV: {exc}")
+            else:
+                st.info(
+                    "No future forecast image or CSV found. Run a forecast to generate outputs/future_forecast.png or future_forecast.csv"
+                )
+
+            # Show numeric future predictions (most recent forecasted price(s))
+            if future_csv.exists():
+                try:
+                    ff = pd.read_csv(future_csv, index_col=0, parse_dates=True)
+                    # support single-column CSVs where the forecast values are in column 0
+                    val_col = ff.columns[0] if len(ff.columns) >= 1 else None
+                    if val_col is not None:
+                        latest = ff[val_col].iloc[-1]
+                        st.markdown("#### Latest future-predicted price")
+                        st.metric(
+                            label="Predicted price (last forecasted date)",
+                            value=f"{latest:.2f}",
+                        )
+                        # show table of all future predictions
+                        st.markdown("#### Future forecast table")
+                        st.dataframe(ff)
+                except Exception as exc:
+                    st.error(f"Unable to display numeric future forecast: {exc}")
+
         st.markdown("### Downloads")
         show_download_buttons()
 
