@@ -1,96 +1,440 @@
-import streamlit as st
-import pandas as pd
 import os
+import subprocess
+import sys
 from pathlib import Path
+from typing import Any
+
+import joblib
+import pandas as pd
 import plotly.express as px
+import streamlit as st
 
 st.set_page_config(page_title="ARIMA Forecast Dashboard", layout="wide")
 
-st.title("Bitcoin Forecasting — Quick Dashboard")
+BASE_DIR = Path(__file__).resolve().parent
+OUTPUT_DIR = BASE_DIR / "outputs"
+RUN_LOG = OUTPUT_DIR / "dashboard_run.log"
+MODEL_FILE = OUTPUT_DIR / "rf_model.joblib"
+FEATURES_FILE = OUTPUT_DIR / "features.csv"
+COMPARISON_FILE = OUTPUT_DIR / "model_comparison_metrics.csv"
+COMPARISON_SUMMARY_FILE = OUTPUT_DIR / "model_comparison_summary.csv"
 
-output_dir = Path("outputs")
+st.title("Bitcoin Forecasting Dashboard")
 
-st.sidebar.header("Data sources")
-use_default = st.sidebar.checkbox("Use outputs/ files if available", value=True)
+if "initialized" not in st.session_state:
+    st.session_state.update(
+        {
+            "use_default": True,
+            "ticker": "BTC-USD",
+            "start_date": "2017-04-01",
+            "end_date": "2025-04-05",
+            "forecast_steps": 30,
+            "output_dir": "outputs",
+            "use_sample": True,
+            "candidate_orders": "1,1,1;2,1,2;1,1,2;2,1,1;0,1,1",
+            "compare_models": True,
+            "seasonal_period": 7,
+            "rf_lags": 7,
+            "ma_window": 7,
+            "run_process": None,
+            "run_status": "idle",
+            "initialized": True,
+        }
+    )
 
-features_file = None
-models_file = None
 
-if use_default and (output_dir / "features.csv").exists():
-    features_file = output_dir / "features.csv"
-else:
-    uploaded = st.sidebar.file_uploader("Upload features CSV (features.csv)", type=["csv"])
-    if uploaded is not None:
-        features_file = uploaded
+@st.cache_data(show_spinner=False)
+def load_csv(path: Path, index_col: int = 0, parse_dates: bool = True) -> pd.DataFrame:
+    return pd.read_csv(path, index_col=index_col, parse_dates=parse_dates)
 
-if use_default and (output_dir / "model_comparison_metrics.csv").exists():
-    models_file = output_dir / "model_comparison_metrics.csv"
-elif use_default and (output_dir / "model_comparison_summary.csv").exists():
-    models_file = output_dir / "model_comparison_summary.csv"
-else:
-    uploaded_models = st.sidebar.file_uploader("Upload model comparison CSV", type=["csv"], key="models")
-    if uploaded_models is not None:
-        models_file = uploaded_models
 
-st.sidebar.markdown("---")
-st.sidebar.markdown("Tips: run `python main.py --preprocess --use-sample --output-dir outputs` to generate example files.")
+@st.cache_resource(show_spinner=False)
+def load_rf_model(path: Path) -> Any:
+    return joblib.load(path)
 
-col1, col2 = st.columns([2, 1])
 
-with col1:
-    st.header("Features")
-    if features_file is None:
-        st.info("No features file provided. Use the sidebar to upload or generate outputs/features.csv")
+def get_feature_dataset(source: Any) -> pd.DataFrame:
+    df = pd.read_csv(source, index_col=0, parse_dates=True)
+    return df
+
+
+def find_feature_file() -> Path | None:
+    if st.session_state.use_default and FEATURES_FILE.exists():
+        return FEATURES_FILE
+    return None
+
+
+def find_model_file() -> Path | None:
+    if MODEL_FILE.exists():
+        return MODEL_FILE
+    return None
+
+
+def get_lag_feature_matrix(df: pd.DataFrame, lags: int) -> pd.DataFrame:
+    expected = [f"lag_{i}" for i in range(1, lags + 1)]
+    if all(col in df.columns for col in expected):
+        return df[expected].dropna()
+    if "close" in df.columns:
+        lagged = pd.DataFrame(
+            {f"lag_{i}": df["close"].shift(i) for i in range(1, lags + 1)}
+        )
+        return lagged.dropna()
+    raise ValueError(
+        "Unable to derive lag features for SHAP explainability. Generate outputs/features.csv or include close/lags in your uploaded file."
+    )
+
+
+def tail_text(path: Path, num_lines: int = 20) -> str:
+    if not path.exists():
+        return "No logs available yet."
+    with open(path, encoding="utf-8", errors="ignore") as fh:
+        lines = fh.readlines()
+    return "".join(lines[-num_lines:])
+
+
+def run_main_process(args: dict[str, Any]) -> None:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    command = [
+        sys.executable,
+        str(BASE_DIR / "main.py"),
+        "--ticker",
+        args["ticker"],
+        "--start-date",
+        args["start_date"],
+        "--end-date",
+        args["end_date"],
+        "--forecast-steps",
+        str(args["forecast_steps"]),
+        "--output-dir",
+        args["output_dir"],
+    ]
+    if args["use_sample"]:
+        command.append("--use-sample")
+    if args["compare_models"]:
+        command.append("--compare-models")
+    if args["candidate_orders"]:
+        command.extend(["--candidate-orders", args["candidate_orders"]])
+    if args["seasonal_period"] is not None:
+        command.extend(["--seasonal-period", str(args["seasonal_period"])])
+    if args["rf_lags"] is not None:
+        command.extend(["--rf-lags", str(args["rf_lags"])])
+    if args["ma_window"] is not None:
+        command.extend(["--ma-window", str(args["ma_window"])])
+
+    with open(RUN_LOG, "a", encoding="utf-8") as log_file:
+        process = subprocess.Popen(
+            command,
+            cwd=str(BASE_DIR),
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    st.session_state.run_process = process
+    st.session_state.run_status = "running"
+    st.session_state.run_command = " ".join(command)
+
+
+def show_download_buttons() -> None:
+    if OUTPUT_DIR.exists():
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if FEATURES_FILE.exists():
+                st.download_button(
+                    "Download features.csv",
+                    FEATURES_FILE.read_bytes(),
+                    file_name="features.csv",
+                    mime="text/csv",
+                )
+            if COMPARISON_FILE.exists():
+                st.download_button(
+                    "Download model_comparison_metrics.csv",
+                    COMPARISON_FILE.read_bytes(),
+                    file_name="model_comparison_metrics.csv",
+                    mime="text/csv",
+                )
+        with col_b:
+            if (OUTPUT_DIR / "metrics.csv").exists():
+                st.download_button(
+                    "Download metrics.csv",
+                    (OUTPUT_DIR / "metrics.csv").read_bytes(),
+                    file_name="metrics.csv",
+                    mime="text/csv",
+                )
+            model_file = find_model_file()
+            if model_file is not None:
+                st.download_button(
+                    "Download rf_model.joblib",
+                    model_file.read_bytes(),
+                    file_name="rf_model.joblib",
+                    mime="application/octet-stream",
+                )
+
+
+def explain_rf_model() -> None:
+    shap_available = True
+    try:
+        import shap  # noqa: F401
+    except ImportError:
+        shap_available = False
+
+    model_path = find_model_file()
+    if model_path is None:
+        st.warning(
+            "No saved RandomForest model found in outputs/rf_model.joblib. Run `python main.py --compare-models` first."
+        )
+        return
+
+    feature_source = find_feature_file()
+    if feature_source is None:
+        st.warning(
+            "No features file found in outputs/features.csv. Run `python main.py --preprocess` before explainability."
+        )
+        return
+
+    try:
+        df = get_feature_dataset(feature_source)
+        X = get_lag_feature_matrix(df, st.session_state.rf_lags)
+        model = load_rf_model(model_path)
+    except Exception as exc:
+        st.error(f"Unable to prepare explainability data: {exc}")
+        return
+
+    st.subheader("RandomForest baseline explainability")
+    st.markdown(
+        "Use SHAP to inspect feature importance for the trained RandomForest baseline. "
+        "This uses the saved `outputs/rf_model.joblib` model and lag features from `outputs/features.csv`."
+    )
+
+    if not shap_available:
+        st.warning(
+            "SHAP is not installed. Install it with `pip install shap` and restart the dashboard."
+        )
+        return
+
+    import shap
+
+    explainer = shap.TreeExplainer(model)
+    shap_values = explainer(X)
+    shap_abs = pd.DataFrame(abs(shap_values.values), columns=X.columns, index=X.index)
+    feature_importance = shap_abs.mean(axis=0).sort_values(ascending=False)
+    st.markdown("### Global SHAP feature importance")
+    fig = px.bar(
+        feature_importance.reset_index().rename(
+            columns={"index": "feature", 0: "importance"}
+        ),
+        x="importance",
+        y="feature",
+        orientation="h",
+        title="Average absolute SHAP value by feature",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("### Local explanation for a selected sample")
+    sample_index = st.selectbox(
+        "Choose a row to explain",
+        options=list(X.index[-20:]),
+        format_func=lambda idx: str(idx),
+    )
+    sample_X = X.loc[[sample_index]]
+    sample_shap = explainer(sample_X)
+    local_df = pd.DataFrame(
+        {
+            "feature": X.columns,
+            "shap_value": sample_shap.values[0],
+            "abs_value": abs(sample_shap.values[0]),
+            "feature_value": sample_X.iloc[0].values,
+        }
+    ).sort_values("abs_value", ascending=False)
+    st.dataframe(local_df.reset_index(drop=True).head(20))
+    fig_local = px.bar(
+        local_df.head(20),
+        x="shap_value",
+        y="feature",
+        orientation="h",
+        title=f"SHAP contribution for row {sample_index}",
+    )
+    st.plotly_chart(fig_local, use_container_width=True)
+
+
+def run_page() -> None:
+    st.header("Run forecasts from the dashboard")
+    with st.form("forecast_form"):
+        ticker = st.text_input("Ticker", value=st.session_state.ticker)
+        start_date = st.text_input("Start date", value=st.session_state.start_date)
+        end_date = st.text_input("End date", value=st.session_state.end_date)
+        forecast_steps = st.number_input(
+            "Forecast steps",
+            min_value=1,
+            max_value=365,
+            value=st.session_state.forecast_steps,
+        )
+        output_dir = st.text_input(
+            "Output directory", value=st.session_state.output_dir
+        )
+        use_sample = st.checkbox(
+            "Use sample data (no network)", value=st.session_state.use_sample
+        )
+        compare_models = st.checkbox(
+            "Compare models after forecasting", value=st.session_state.compare_models
+        )
+        candidate_orders = st.text_input(
+            "ARIMA candidate orders",
+            value=st.session_state.candidate_orders,
+        )
+        seasonal_period = st.number_input(
+            "Seasonal period for SARIMAX",
+            min_value=1,
+            max_value=30,
+            value=st.session_state.seasonal_period,
+        )
+        rf_lags = st.number_input(
+            "RandomForest lag features",
+            min_value=1,
+            max_value=30,
+            value=st.session_state.rf_lags,
+        )
+        ma_window = st.number_input(
+            "Moving average window",
+            min_value=1,
+            max_value=60,
+            value=st.session_state.ma_window,
+        )
+        submit_button = st.form_submit_button("Start forecast run")
+
+    if submit_button:
+        st.session_state.update(
+            {
+                "ticker": ticker,
+                "start_date": start_date,
+                "end_date": end_date,
+                "forecast_steps": forecast_steps,
+                "output_dir": output_dir,
+                "use_sample": use_sample,
+                "candidate_orders": candidate_orders,
+                "compare_models": compare_models,
+                "seasonal_period": seasonal_period,
+                "rf_lags": rf_lags,
+                "ma_window": ma_window,
+            }
+        )
+        run_args = {
+            "ticker": ticker,
+            "start_date": start_date,
+            "end_date": end_date,
+            "forecast_steps": forecast_steps,
+            "output_dir": output_dir,
+            "use_sample": use_sample,
+            "compare_models": compare_models,
+            "candidate_orders": candidate_orders,
+            "seasonal_period": seasonal_period,
+            "rf_lags": rf_lags,
+            "ma_window": ma_window,
+        }
+        run_main_process(run_args)
+
+    if st.session_state.run_process is not None:
+        process = st.session_state.run_process
+        return_code = process.poll()
+        if return_code is None:
+            st.info("Forecast run is currently executing in the background.")
+        else:
+            st.success(f"Forecast run finished with exit code {return_code}.")
+            st.session_state.run_status = "done"
+            st.session_state.run_process = None
+    st.markdown("#### Output logs")
+    st.text_area("Forecast process log", value=tail_text(RUN_LOG), height=240)
+
+
+tab_overview, tab_explain, tab_run = st.tabs(
+    [
+        "Overview",
+        "Explainability",
+        "Run Forecast",
+    ]
+)
+
+with tab_overview:
+    st.header("Overview")
+    st.sidebar.header("Data sources")
+    st.session_state.use_default = st.sidebar.checkbox(
+        "Use outputs/ files if available", value=st.session_state.use_default
+    )
+    st.sidebar.markdown("---")
+    st.sidebar.markdown(
+        "Tips: run `python main.py --preprocess --use-sample --output-dir outputs` to generate example files."
+    )
+    if st.session_state.use_default:
+        feat_source = FEATURES_FILE if FEATURES_FILE.exists() else None
+        model_source = (
+            COMPARISON_FILE
+            if COMPARISON_FILE.exists()
+            else (COMPARISON_SUMMARY_FILE if COMPARISON_SUMMARY_FILE.exists() else None)
+        )
     else:
-        try:
-            feats = pd.read_csv(features_file, index_col=0, parse_dates=True)
-            st.subheader("Features preview")
-            st.dataframe(feats.head())
+        feat_source = None
+        model_source = None
 
-            st.subheader("Feature distributions")
-            select_col = st.selectbox("Select feature to plot", options=list(feats.columns), index=0)
-            fig = px.histogram(feats, x=select_col, nbins=50, title=f"Distribution of {select_col}")
-            st.plotly_chart(fig, use_container_width=True)
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        st.subheader("Features")
+        if feat_source is None:
+            st.info(
+                "No features file found in outputs. Upload a features CSV or generate outputs/features.csv."
+            )
+        else:
+            try:
+                feats = load_csv(feat_source)
+                st.dataframe(feats.head())
+                st.markdown("### Feature distributions")
+                select_col = st.selectbox(
+                    "Select feature to plot", options=list(feats.columns), index=0
+                )
+                fig = px.histogram(
+                    feats, x=select_col, nbins=50, title=f"Distribution of {select_col}"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+                st.markdown("### Time series view")
+                ts_cols = st.multiselect(
+                    "Choose columns to plot",
+                    options=list(feats.columns),
+                    default=[feats.columns[0]],
+                )
+                if ts_cols:
+                    fig_ts = px.line(feats[ts_cols])
+                    st.plotly_chart(fig_ts, use_container_width=True)
+                st.markdown("### Correlation matrix")
+                corr = feats.corr()
+                fig_corr = px.imshow(corr, text_auto=True, title="Feature Correlation")
+                st.plotly_chart(fig_corr, use_container_width=True)
+            except Exception as exc:
+                st.error(f"Unable to read features file: {exc}")
+    with col2:
+        st.subheader("Model comparison & metrics")
+        if model_source is None:
+            st.info(
+                "No model comparison file found in outputs. Generate model_comparison_metrics.csv by running `python main.py --compare-models`."
+            )
+        else:
+            try:
+                mdf = load_csv(model_source)
+                st.dataframe(mdf)
+                if "mae" in mdf.columns:
+                    best = mdf.loc[mdf["mae"].idxmin()]
+                    st.markdown("### Best model by MAE")
+                    st.write(best.to_dict())
+                if "rmse" in mdf.columns:
+                    fig_rmse = px.bar(mdf, x="model", y="rmse", title="RMSE by model")
+                    st.plotly_chart(fig_rmse, use_container_width=True)
+                if "mape" in mdf.columns:
+                    fig_mape = px.bar(mdf, x="model", y="mape", title="MAPE by model")
+                    st.plotly_chart(fig_mape, use_container_width=True)
+            except Exception as exc:
+                st.error(f"Unable to read model comparison file: {exc}")
+        st.markdown("### Downloads")
+        show_download_buttons()
 
-            st.subheader("Time series view")
-            ts_cols = st.multiselect("Choose columns to plot", options=list(feats.columns), default=[feats.columns[0]])
-            if ts_cols:
-                fig_ts = px.line(feats[ts_cols])
-                st.plotly_chart(fig_ts, use_container_width=True)
+with tab_explain:
+    explain_rf_model()
 
-            st.subheader("Correlation matrix")
-            corr = feats.corr()
-            fig_corr = px.imshow(corr, text_auto=True, title="Feature Correlation")
-            st.plotly_chart(fig_corr, use_container_width=True)
-        except Exception as exc:
-            st.error(f"Unable to read features file: {exc}")
-
-with col2:
-    st.header("Model comparison & metrics")
-    if models_file is None:
-        st.info("No model comparison file provided. Run model comparison via `python main.py --compare-models` to generate one.")
-    else:
-        try:
-            mdf = pd.read_csv(models_file)
-            st.subheader("Model comparison")
-            st.dataframe(mdf)
-
-            st.subheader("Best model by MAE")
-            if "mae" in mdf.columns:
-                best = mdf.loc[mdf["mae"].idxmin()]
-                st.write(best.to_dict())
-
-            if "rmse" in mdf.columns:
-                st.subheader("RMSE chart")
-                fig_rmse = px.bar(mdf, x="model", y="rmse", title="RMSE by model")
-                st.plotly_chart(fig_rmse, use_container_width=True)
-
-            if "mape" in mdf.columns:
-                st.subheader("MAPE chart")
-                fig_mape = px.bar(mdf, x="model", y="mape", title="MAPE by model")
-                st.plotly_chart(fig_mape, use_container_width=True)
-        except Exception as exc:
-            st.error(f"Unable to read model comparison file: {exc}")
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("Developed with Copilot CLI runtime in VS Code.")
+with tab_run:
+    run_page()

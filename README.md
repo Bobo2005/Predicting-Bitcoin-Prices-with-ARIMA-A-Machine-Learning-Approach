@@ -85,3 +85,15 @@ streamlit run streamlit_app.py
 ```
 
 The dashboard loads feature data and model comparison results from the output folder.
+
+### Dashboard features
+
+- Overview of generated feature data and model-comparison metrics
+- Download buttons for CSV output files and saved model artifacts
+- Background forecast runner for `main.py` with CLI options exposed in the UI
+- SHAP explainability for the saved RandomForest baseline model
+
+### Notes
+
+- SHAP is optional but recommended for explainability. It is included in `requirements.txt`.
+- If a saved RandomForest model or feature dataset is not available, the dashboard will prompt you to generate them first.
