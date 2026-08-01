@@ -1,0 +1,22 @@
+seed: 42
+ticker: "BTC-USD"
+start_date: "2017-04-01"
+end_date: "2025-04-05"
+train_split: 0.8
+forecast_steps: 30
+candidate_orders:
+  - [1, 1, 1]
+  - [2, 1, 2]
+  - [1, 1, 2]
+  - [2, 1, 1]
+  - [0, 1, 1]
+output_dir: "outputs"
+preprocess:
+  lags: 7
+  outlier_multiplier: 1.5
+models:
+  rf:
+    n_estimators: 100
+    random_state: 42
+  sarimax:
+    seasonal_period: 7
