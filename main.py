@@ -4,6 +4,7 @@ import argparse
 import logging
 import warnings
 from pathlib import Path
+from typing import Any
 
 import matplotlib
 import yaml
@@ -34,10 +35,43 @@ from preprocessing import (
 from utils import save_model, set_global_seed
 
 
+def flatten_config(
+    config: dict[str, Any], parent_key: str = "", sep: str = "_"
+) -> dict[str, Any]:
+    flattened: dict[str, Any] = {}
+    for key, value in config.items():
+        name = f"{parent_key}{sep}{key}" if parent_key else key
+        if isinstance(value, dict):
+            flattened.update(flatten_config(value, name, sep=sep))
+        else:
+            flattened[name] = value
+    return flattened
+
+
+def load_config(path: str) -> dict[str, Any]:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            loaded = yaml.safe_load(fh) or {}
+            if not isinstance(loaded, dict):
+                raise ValueError("Config file must contain a YAML mapping")
+            return flatten_config(loaded)
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        raise RuntimeError(f"Unable to read configuration {path}: {exc}") from exc
+
+
 def parse_args() -> argparse.Namespace:
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument(
+        "--config", default="config.yaml", help="Path to config YAML file"
+    )
+    known_args, _ = config_parser.parse_known_args()
+    config_values = load_config(known_args.config)
+
     parser = argparse.ArgumentParser(description="Forecast Bitcoin prices with ARIMA")
     parser.add_argument(
-        "--config", default="config.yaml", help="Path to config YAML file"
+        "--config", default=known_args.config, help="Path to config YAML file"
     )
     parser.add_argument(
         "--ticker", default=DEFAULT_TICKER, help="Ticker symbol to fetch"
@@ -68,6 +102,12 @@ def parse_args() -> argparse.Namespace:
         help="Directory where plots and metrics will be stored",
     )
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Global random seed for reproducible behavior",
+    )
+    parser.add_argument(
         "--use-sample",
         action="store_true",
         help="Use built-in sample data instead of downloading from Yahoo Finance",
@@ -76,6 +116,18 @@ def parse_args() -> argparse.Namespace:
         "--preprocess",
         action="store_true",
         help="Run preprocessing/feature-engineering and save features to outputs/features.csv",
+    )
+    parser.add_argument(
+        "--preprocess-lags",
+        type=int,
+        default=7,
+        help="Number of lag features to create during preprocessing",
+    )
+    parser.add_argument(
+        "--outlier-multiplier",
+        type=float,
+        default=1.5,
+        help="IQR multiplier used for outlier clipping during preprocessing",
     )
     parser.add_argument(
         "--candidate-orders",
@@ -88,25 +140,49 @@ def parse_args() -> argparse.Namespace:
         help="Run model comparison (SARIMAX, Prophet if available, and RandomForest baseline)",
     )
     parser.add_argument(
+        "--seasonal-period",
+        type=int,
+        default=7,
+        help="Weekly seasonality period used for seasonal SARIMAX",
+    )
+    parser.add_argument(
+        "--rf-lags",
+        type=int,
+        default=7,
+        help="Number of lag features for the RandomForest baseline",
+    )
+    parser.add_argument(
+        "--ma-window",
+        type=int,
+        default=7,
+        help="Window size for the moving average baseline",
+    )
+    parser.add_argument(
         "--tune",
         action="store_true",
         help="Run a short tuning routine for RF and SARIMAX (time-consuming)",
     )
+    parser.set_defaults(**config_values)
     return parser.parse_args()
 
 
-def parse_candidate_orders(spec: str) -> list[tuple[int, int, int]]:
-    orders = []
-    for chunk in spec.split(";"):
-        cleaned = chunk.strip()
-        if not cleaned:
-            continue
-        params = tuple(int(value) for value in cleaned.split(",") if value.strip())
-        if len(params) != 3:
-            raise ValueError(
-                f"Invalid order '{chunk}'. Expected three integers separated by commas"
-            )
-        orders.append(params)
+def parse_candidate_orders(
+    spec: str | Sequence[Sequence[int]],
+) -> list[tuple[int, int, int]]:
+    if isinstance(spec, list):
+        orders = [tuple(int(value) for value in item) for item in spec]
+    else:
+        orders = []
+        for chunk in spec.split(";"):
+            cleaned = chunk.strip()
+            if not cleaned:
+                continue
+            params = tuple(int(value) for value in cleaned.split(",") if value.strip())
+            if len(params) != 3:
+                raise ValueError(
+                    f"Invalid order '{chunk}'. Expected three integers separated by commas"
+                )
+            orders.append(params)
     if not orders:
         raise ValueError("No candidate orders were provided")
     return orders
@@ -208,6 +284,7 @@ def save_metrics(
 
 def main() -> None:
     args = parse_args()
+    set_global_seed(args.seed)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -225,9 +302,11 @@ def main() -> None:
         # Create OHLCV features (will raise if no Close column)
         features = create_ohlcv_features(df)
         # Detect and clip outliers on close
-        features["close"] = detect_outliers_iqr(features["close"])
+        features["close"] = detect_outliers_iqr(
+            features["close"], multiplier=args.outlier_multiplier
+        )
         # Add lag features for supervised models
-        lagged = create_lag_features(features["close"], lags=7)
+        lagged = create_lag_features(features["close"], lags=args.preprocess_lags)
         # Join rolling features with lagged (aligning indexes)
         combined = lagged.join(features.drop(columns=["close"]).reindex(lagged.index))
         scaled, _scaler = scale_features(combined.fillna(0.0), method="standard")
@@ -257,6 +336,9 @@ def main() -> None:
             train_split=args.train_split,
             forecast_steps=args.forecast_steps,
             output_dir=str(output_dir),
+            seasonal_period=args.seasonal_period,
+            rf_lags=args.rf_lags,
+            ma_window=args.ma_window,
         )
         print("Model comparison results:")
         print(cmp_df.to_string(index=False))

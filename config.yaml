@@ -14,9 +14,6 @@ output_dir: "outputs"
 preprocess:
   lags: 7
   outlier_multiplier: 1.5
-models:
-  rf:
-    n_estimators: 100
-    random_state: 42
-  sarimax:
-    seasonal_period: 7
+seasonal_period: 7
+rf_lags: 7
+ma_window: 7

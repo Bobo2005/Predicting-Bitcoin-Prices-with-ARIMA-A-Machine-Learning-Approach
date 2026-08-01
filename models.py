@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error
+from statsmodels.tsa.holtwinters import SimpleExpSmoothing
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 try:
@@ -52,6 +53,34 @@ def prophet_forecast(train: pd.Series, periods: int, freq: str = "D") -> pd.Seri
     fc = forecast.set_index("ds")["yhat"].loc[~forecast["ds"].isin(df["ds"])]
     fc.index = pd.DatetimeIndex(fc.index)
     return pd.Series(fc.values, index=fc.index, name="Prophet_Forecast")
+
+
+def naive_forecast(train: pd.Series, test_index: pd.DatetimeIndex) -> pd.Series:
+    last_value = float(train.iloc[-1])
+    return pd.Series(
+        [last_value] * len(test_index), index=test_index, name="Naive_Forecast"
+    )
+
+
+def moving_average_forecast(
+    train: pd.Series, test_index: pd.DatetimeIndex, window: int = 7
+) -> pd.Series:
+    window = min(window, len(train))
+    avg_value = float(train.iloc[-window:].mean())
+    return pd.Series(
+        [avg_value] * len(test_index), index=test_index, name="MovingAverage_Forecast"
+    )
+
+
+def exp_smoothing_forecast(
+    train: pd.Series,
+    test_index: pd.DatetimeIndex,
+) -> pd.Series:
+    model = SimpleExpSmoothing(train)
+    fit = model.fit(optimized=True)
+    preds = fit.forecast(len(test_index))
+    preds.index = test_index
+    return pd.Series(preds.values, index=test_index, name="ExpSmoothing_Forecast")
 
 
 def rf_baseline_forecast(
@@ -100,6 +129,8 @@ def compare_models(
     forecast_steps: int = 30,
     output_dir: str | None = None,
     seasonal_period: int = 7,
+    rf_lags: int = 7,
+    ma_window: int = 7,
     persist_models: bool = True,
 ) -> pd.DataFrame:
     """
@@ -191,9 +222,48 @@ def compare_models(
     else:
         warnings.warn("Prophet not installed; skipping Prophet comparison")
 
+    # Naive baseline
+    try:
+        naive_pred = naive_forecast(train, test.index)
+        mae = mean_absolute_error(test, naive_pred)
+        rmse = np.sqrt(mean_squared_error(test, naive_pred))
+        mape = _safe_mape(test, naive_pred)
+        results.append({"model": "Naive", "mae": mae, "rmse": rmse, "mape": mape})
+    except Exception as exc:
+        warnings.warn(f"Naive baseline failed: {exc}")
+
+    # Moving average baseline
+    try:
+        ma_pred = moving_average_forecast(train, test.index, window=ma_window)
+        mae = mean_absolute_error(test, ma_pred)
+        rmse = np.sqrt(mean_squared_error(test, ma_pred))
+        mape = _safe_mape(test, ma_pred)
+        results.append(
+            {
+                "model": f"MovingAverage_window{ma_window}",
+                "mae": mae,
+                "rmse": rmse,
+                "mape": mape,
+            }
+        )
+    except Exception as exc:
+        warnings.warn(f"Moving average baseline failed: {exc}")
+
+    # Exponential smoothing baseline
+    try:
+        exp_pred = exp_smoothing_forecast(train, test.index)
+        mae = mean_absolute_error(test, exp_pred)
+        rmse = np.sqrt(mean_squared_error(test, exp_pred))
+        mape = _safe_mape(test, exp_pred)
+        results.append(
+            {"model": "ExpSmoothing", "mae": mae, "rmse": rmse, "mape": mape}
+        )
+    except Exception as exc:
+        warnings.warn(f"Exponential smoothing failed: {exc}")
+
     # RandomForest baseline
     try:
-        rf_pred = rf_baseline_forecast(train, test.index, lags=7)
+        rf_pred = rf_baseline_forecast(train, test.index, lags=rf_lags)
         common_idx = test.index.intersection(rf_pred.index)
         if common_idx.empty:
             raise ValueError(
@@ -205,7 +275,12 @@ def compare_models(
         )
         mape = _safe_mape(test.loc[common_idx], rf_pred.loc[common_idx])
         results.append(
-            {"model": "RandomForest_lags7", "mae": mae, "rmse": rmse, "mape": mape}
+            {
+                "model": f"RandomForest_lags{rf_lags}",
+                "mae": mae,
+                "rmse": rmse,
+                "mape": mape,
+            }
         )
         if persist_models and output_dir:
             try:
@@ -213,7 +288,7 @@ def compare_models(
 
                 # fit the RF again and save it
                 df = pd.DataFrame({"y": train})
-                for lag in range(1, 8):
+                for lag in range(1, rf_lags + 1):
                     df[f"lag_{lag}"] = df["y"].shift(lag)
                 df = df.dropna()
                 X = df.drop(columns=["y"]).values

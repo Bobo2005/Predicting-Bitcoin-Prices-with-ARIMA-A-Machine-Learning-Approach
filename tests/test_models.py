@@ -9,3 +9,6 @@ def test_compare_models_runs_on_sample():
     )
     # Should return a DataFrame
     assert hasattr(df, "shape")
+    assert "Naive" in df["model"].values
+    assert any(name.startswith("MovingAverage") for name in df["model"].values)
+    assert "ExpSmoothing" in df["model"].values
