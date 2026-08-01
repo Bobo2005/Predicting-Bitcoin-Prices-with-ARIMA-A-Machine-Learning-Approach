@@ -380,6 +380,97 @@ def run_page() -> None:
     st.markdown("#### Output logs")
     st.text_area("Forecast process log", value=tail_text(RUN_LOG), height=240)
 
+    # Also attempt to show latest forecast results and an easy interpretation for users
+    combined_csv = OUTPUT_DIR / "combined_forecast.csv"
+    if combined_csv.exists():
+        try:
+            cdf = pd.read_csv(combined_csv, index_col=0, parse_dates=True)
+            st.markdown("#### Latest forecast results")
+
+            # Reuse the same interactive figure building as in Overview but compact
+            hover_template = "%{x|%Y-%m-%d}<br>Price: $%{y:.2f}<extra></extra>"
+            fig = go.Figure()
+            show_ci = st.session_state.get("show_ci", True)
+            visible = st.session_state.get("visible_traces", ["Historical Price", "ARIMA (test)", "Future Forecast"]) or []
+
+            if "price" in cdf.columns and "Historical Price" in visible:
+                fig.add_trace(
+                    go.Scatter(
+                        x=cdf.index,
+                        y=cdf["price"],
+                        mode="lines",
+                        name="Historical Price",
+                        line=dict(color="black"),
+                        hovertemplate=hover_template,
+                    )
+                )
+            if "arima_forecast" in cdf.columns and "ARIMA (test)" in visible:
+                fig.add_trace(
+                    go.Scatter(
+                        x=cdf.index,
+                        y=cdf["arima_forecast"],
+                        mode="lines",
+                        name="ARIMA (test)",
+                        line=dict(color="red", dash="dash"),
+                        hovertemplate=hover_template,
+                    )
+                )
+                if show_ci and "arima_upper" in cdf.columns and "arima_lower" in cdf.columns:
+                    fig.add_trace(go.Scatter(x=cdf.index, y=cdf.get("arima_upper"), line=dict(width=0), hoverinfo="skip", showlegend=False))
+                    fig.add_trace(go.Scatter(x=cdf.index, y=cdf.get("arima_lower"), line=dict(width=0), fill="tonexty", fillcolor="rgba(255,0,0,0.12)", hoverinfo="skip", showlegend=False))
+            if "future_forecast" in cdf.columns and "Future Forecast" in visible:
+                fig.add_trace(
+                    go.Scatter(
+                        x=cdf.index,
+                        y=cdf["future_forecast"],
+                        mode="lines",
+                        name="Future Forecast",
+                        line=dict(color="green"),
+                        hovertemplate=hover_template,
+                    )
+                )
+                if show_ci and "future_upper" in cdf.columns and "future_lower" in cdf.columns:
+                    fig.add_trace(go.Scatter(x=cdf.index, y=cdf.get("future_upper"), line=dict(width=0), hoverinfo="skip", showlegend=False))
+                    fig.add_trace(go.Scatter(x=cdf.index, y=cdf.get("future_lower"), line=dict(width=0), fill="tonexty", fillcolor="rgba(0,128,0,0.12)", hoverinfo="skip", showlegend=False))
+
+            fig.update_layout(title="Latest combined forecast", xaxis_title="Date", yaxis_title="Price (USD)", hovermode="x unified", xaxis=dict(rangeslider=dict(visible=False), type="date"), yaxis=dict(tickprefix="$"), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Plain-language interpretation
+            try:
+                last_hist = cdf["price"].dropna().iloc[-1] if "price" in cdf.columns else None
+                first_future = cdf["future_forecast"].dropna().iloc[0] if "future_forecast" in cdf.columns else None
+                final_pred = cdf["future_forecast"].dropna().iloc[-1] if "future_forecast" in cdf.columns else None
+                horizon_days = len(cdf["future_forecast"].dropna()) if "future_forecast" in cdf.columns else 0
+
+                interp_lines = []
+                if last_hist is not None and final_pred is not None:
+                    pct_change = (final_pred - last_hist) / last_hist * 100
+                    interp_lines.append(f"Last observed price: ${last_hist:,.2f}")
+                    interp_lines.append(f"First predicted price (next day): ${first_future:,.2f}")
+                    interp_lines.append(f"Final predicted price (after {horizon_days} days): ${final_pred:,.2f}")
+                    interp_lines.append(f"This represents a {pct_change:+.2f}% change versus the last observed price.")
+                elif final_pred is not None:
+                    interp_lines.append(f"Final predicted price (after {horizon_days} days): ${final_pred:,.2f}")
+                else:
+                    interp_lines.append("No numeric future forecasts available to summarize.")
+
+                interp_lines.append("")
+                interp_lines.append("Interpretation / guidance:")
+                interp_lines.append("- The ARIMA forecast provides a model-based estimate; treat short-term forecasts as indicative, not certain.")
+                interp_lines.append("- Consider this prediction alongside market news and volatility; model does not capture sudden regime shifts.")
+                interp_lines.append("- Use the shaded confidence bands (if visible) to gauge uncertainty around the point forecast.")
+
+                st.markdown("#### Quick interpretation")
+                for line in interp_lines:
+                    st.write(line)
+
+            except Exception as exc:
+                st.warning(f"Unable to compute interpretation: {exc}")
+
+        except Exception as exc:
+            st.error(f"Unable to load combined forecast for display: {exc}")
+
 
 tab_overview, tab_explain, tab_run = st.tabs(
     [
