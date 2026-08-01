@@ -344,6 +344,36 @@ def save_metrics(
         pass
 
 
+def run_arima_cv(
+    series: pd.Series,
+    output_dir: Path,
+    candidate_orders: list[tuple[int, int, int]],
+    train_window: int = 150,
+    horizon: int = 7,
+    max_splits: int = 5,
+) -> pd.DataFrame:
+    """Run rolling-window cross-validation for candidate ARIMA orders.
+
+    Saves results to outputs/arima_cv_results.csv and returns the DataFrame.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, object]] = []
+    for order in candidate_orders:
+        try:
+            mae = rolling_cv_scores_arima(
+                series, order=order, train_window=train_window, horizon=horizon, max_splits=max_splits
+            )
+            rows.append({"order": f"{order}", "cv_mae": float(mae), "train_window": train_window, "horizon": horizon})
+        except Exception:
+            rows.append({"order": f"{order}", "cv_mae": float("nan"), "train_window": train_window, "horizon": horizon})
+    df = pd.DataFrame(rows)
+    try:
+        df.to_csv(output_dir / "arima_cv_results.csv", index=False)
+    except Exception:
+        pass
+    return df
+
+
 def run_tuning(
     series: pd.Series,
     output_dir: Path,
@@ -480,6 +510,22 @@ def main() -> None:
             cmp_df.to_csv(output_dir / "model_comparison_summary.csv", index=False)
         except Exception:
             pass
+
+        # Run rolling-window ARIMA CV for candidate orders and save results for the dashboard
+        try:
+            arima_cv_df = run_arima_cv(
+                prices,
+                output_dir,
+                parse_candidate_orders(args.candidate_orders),
+                train_window=150,
+                horizon=min(7, args.forecast_steps),
+                max_splits=5,
+            )
+            print("ARIMA cross-validation results:")
+            print(arima_cv_df.to_string(index=False))
+        except Exception as exc:
+            print(f"ARIMA cross-validation failed: {exc}")
+
         if args.tune:
             tuning_meta = run_tuning(
                 prices,
